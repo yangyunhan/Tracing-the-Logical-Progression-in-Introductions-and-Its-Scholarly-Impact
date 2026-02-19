@@ -6,6 +6,7 @@ import statsmodels.formula.api as smf
 from sklearn.neighbors import NearestNeighbors
 from sklearn.linear_model import LogisticRegression
 import pingouin as pg
+import statsmodels.api as sm
 
 
 class Regression(object):
@@ -141,6 +142,61 @@ class Regression(object):
         print(model_2.summary())
         print(f"field {field} Done!!!!!!!!")
 
+    def normalization_for_glm(self, field):
+        print(f"Preparing data for GLM - field: {field}")
+        df = pd.read_csv(self.new_version + field + '_regression.txt', sep=';')
+        continuous_features = [
+            'author_num', 'topic_size', 'first_author_prod', 'last_author_prod',
+            'first_author_h_index', 'last_author_h_index', 'title_len', 'len_paragraph', 'unclear_ratio',
+            'coverage', 'coverage_weighted', 'spearman_seq', 'IT', 'DB', 'ERQ', 'SO', 'SF', 'MO'
+        ]
+
+        def z_score(series):
+            return (series - series.mean()) / series.std()
+
+        for col in continuous_features:
+            if col in df.columns:
+                df[col] = z_score(df[col])
+        df['author_num'] = df['author_num'].apply(lambda x: 10 if x > 10 else x)
+        df.to_csv(self.new_version + field + '_glm_ready.txt', sep=';', index=False)
+
+    def run_negative_binomial_glm(self, field):
+        df = pd.read_csv(self.new_version + field + '_glm_ready.txt', sep=';')
+        df['quality_group'] = pd.qcut(df['journal_cc'], q=3, labels=['lowest', 'mid', 'highest'])
+        df['spearman_seq'] = df['spearman_seq'].clip(lower=-3, upper=3)
+        formula = """
+        citation_count ~ author_num + topic_size + first_author_prod + first_author_h_index + 
+        last_author_prod + last_author_h_index + title_len + len_paragraph + 
+        IT + DB + ERQ + SO + SF + MO + C(year) + C(quality_group)
+        """
+        formula_2 = """
+        citation_count ~ author_num + topic_size + first_author_prod + first_author_h_index + last_author_prod + 
+        last_author_h_index + title_len + len_paragraph + unclear_ratio + coverage_weighted + spearman_seq +
+        C(year) + C(quality_group)
+        """
+        print("正在拟合负二项回归模型...")
+        model = smf.glm(
+            formula=formula_2,
+            data=df,
+            family=sm.families.NegativeBinomial(link=sm.families.links.Log())
+        ).fit()
+        results_df = pd.DataFrame({
+            'Coefficient (beta)': model.params,
+            'P-value': model.pvalues,
+            'Impact_Percentage': (np.exp(model.params) - 1) * 100  # 转化公式：(exp(beta) - 1) * 100
+        })
+        results_df['Importance'] = results_df['Impact_Percentage'].apply(
+            lambda x: 'Substantive' if abs(x) > 5 else 'Marginal'
+        )
+        print("\n================ 模型汇总报告 ================")
+        print(model.summary())
+        print("\n================ 系数转化分析 (Response to Reviewer) ================")
+        print(results_df.loc[~results_df.index.str.contains('C\(|Intercept')])  # 排除控制变量显示
+        results_summary = model.summary().tables[1]  # 获取 summary 的系数表部分
+        results_df = pd.DataFrame(results_summary.data[1:], columns=results_summary.data[0])
+        results_df['Impact %'] = results_df['coef'].apply(lambda x: f"{(np.exp(float(x)) - 1) * 100:.2f}%")
+        results_df.to_csv(f"{field}_regression_2_to_excel.csv", index=False, sep=',')
+
     def group(self, field, input_file="_regression.txt", output_file="_group_10.txt"):
         df = pd.read_csv(self.output + field + input_file, sep=';')
         upper_val = self.citation_90[field]
@@ -256,6 +312,8 @@ if __name__ == '__main__':
         dk.group(field)
         dk.run_psm(field)
         dk.two_group_ttest_to_excel(field)
+        dk.normalization_for_glm(field)
+        dk.run_negative_binomial_glm(field)
     end_time = datetime.datetime.now()
     print(f"It takes {(end_time - start_time).seconds} seconds")
     print('Done Regression!')
